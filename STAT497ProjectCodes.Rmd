@@ -1,0 +1,417 @@
+---
+title: "STAT497"
+author: "Alper Tunahan Öztürk"
+date: "12/30/2021"
+output:
+  word_document: default
+  html_document: default
+---
+
+
+```{r, message = FALSE, results = 'hide', echo = FALSE}
+if (!require('ggplot2')) install.packages('ggplot2'); library('ggplot2')
+if (!require('xts')) install.packages('xts'); library('xts')
+if (!require('lubridate')) install.packages('lubridate'); library('lubridate')
+if (!require('forecast')) install.packages('forecast'); library('forecast')
+if (!require('anomalize')) install.packages('anomalize'); library('anomalize')
+if (!require('chron')) install.packages('chron'); library('chron')
+if (!require('tidyverse')) install.packages('tidyverse'); library('tidyverse')
+if (!require('tseries')) install.packages('tseries'); library('tseries')
+if (!require('uroot')) install.packages('uroot'); library('uroot')
+if (!require('gridExtra')) install.packages('gridExtra'); library('gridExtra')
+if (!require('pdR')) install.packages('pdR'); library('pdR')
+if (!require('caschrono')) install.packages('caschrono'); library('caschrono')
+if (!require('TSA')) install.packages('TSA'); library('TSA')
+if (!require('aTSA')) install.packages('aTSA'); library('aTSA')
+if (!require('prophet')) install.packages('prophet'); library('prophet') 
+if (!require('Rcpp')) install.packages('Rcpp'); library('Rcpp')
+if (!require('lmtest')) install.packages('lmtest'); library('lmtest')
+```
+
+
+
+
+```{r}
+allEmployees <- read.csv("All_employees_motor_vehicles_and_parts.csv")
+
+#Remove the year 2020 and 2021
+allEmployees <- allEmployees[-c(grep("202", allEmployees$DATE)), ]
+
+colnames(allEmployees) <- c("Time", "Employees")
+class(allEmployees)
+
+allEmployees <- ts(allEmployees, start = 1990, frequency = 12)
+allEmployees <- allEmployees[,-1]
+
+```
+# Visualization of Time Series
+
+```{r}
+
+ts.plot(allEmployees, main = "Time Series Plot of Employees")
+
+# The plot shows that it does not seem stationary.
+
+# ACF shows slow decay that is an indication of being non-stationary.
+ggAcf(allEmployees,main="ACF of Employees", col="red", lag.max = 48) + theme_classic()
+
+# Since ACF indicates the non-stationary, no need to interpret PACF.
+ggPacf(allEmployees,main="PACF of Employees", col="red", lag.max = 48) + theme_classic()
+```
+
+```{r}
+train <- window(allEmployees,end=c(2018, 12))
+
+test <- window(allEmployees,start=c(2019, 1))
+
+# Before going further, we must apply box-cox transformation to stabilize the variance of the system if it is necessary.
+lambda <- BoxCox.lambda(train)
+lambda
+
+# Since lambda value is close to 1 the Box-Cox transformation is not needed.
+
+
+autoplot(BoxCox(train,lambda), colour = 'red') + theme_classic()
+```
+
+```{r}
+time<-as.chron(train)
+time1<-as.Date(time,format="%d-%b-%y")
+
+train_anomaly <- data.frame(train=train)
+rownames(train_anomaly) <- time1
+
+
+train_anomaly_ts <- train_anomaly %>% rownames_to_column() %>% as_tibble() %>% 
+  mutate(date = as.Date(rowname)) %>% select(-one_of("rowname"))
+
+
+train_anomaly_ts %>% 
+  time_decompose(train, method = "stl", frequency = "auto", trend = "auto") %>%
+  anomalize(remainder, method = "gesd", alpha = 0.05, max_anoms = 0.2) %>%
+  plot_anomaly_decomposition()
+
+#in order to clean data from anomalies tsclean function is used. After this part we will use cleaned train data set named cdata.
+cdata<-tsclean(train)
+```
+
+```{r}
+#In order to determine whether the process is stationary or not formal tests conducted.
+
+tseries::kpss.test(cdata, null = c("Level"))
+tseries::kpss.test(cdata, null = c("Trend"))
+#Ho: The process is stationary. 
+#H1: The process is not stationary.
+#p-value equals to 0.01 and it is less than alpha so we reject H0 i.e. the process is not stationary and seems to have a stochastic trend.
+
+adf.test(cdata)
+#Ho: The process has unit root (non-stationary). 
+#H1: The process is stationary.
+#p-value equals to 0.509 and it is greater than alpha so we fail to reject H0 means that the process has unit root i.e. the process is not stationary.
+
+pp.test(cdata)
+#Ho: The process has unit root (non-stationary/stoch. trend). 
+#H1: The process does not have unit root.(stationary)
+#p-value equals to 0.9831 and it is greater than alpha so we fail to reject H0 means that the process has unit root i.e. the process is not stationary.
+
+# above tests show that the process is not stationary, has not regular unit root.
+
+
+# Seasonality check
+# Even though the data was seasonaly adjusted, I checked the seasonality.
+
+# In order to determine whether the process has seasonal unit root or not HEGY, OCSB and Canova-Hansen tests are conducted.
+
+#Hypothesis for Regular Unit Root
+
+#H0: The system has a regular unit root.
+#H1: The system does not contain any regular unit root.
+
+#Hypothesis for Seasonal Unit Root
+
+#H0: The system has a seasonal unit root.
+#H1: The system does not contain any seasonal unit root.
+
+hegy.out <- HEGY.test(wts=cdata, itsd=c(1, 0, 0),regvar=0, selectlags=list(mode="aic", Pmax=12))
+hegy.out$stats #HEGY test statistics
+
+#In this output, we will use p value of tpi_1 for regular unit root and use the p value of F_11:12 for testing seasonal unit root.
+
+# Since p-value of tpi_1 > 0.05 we fail to reject H0. We can say that we have regular unit root.
+# Again p-value of F_11:12 < 0.05 we reject H0 which means that the data does not contain seasonal unit root.
+
+
+ch.test(cdata, type = "dummy", sid = c(1:12))
+
+
+#H0 : The series is purely deterministic and stationary.
+#H1:  We have stochastic seasonality.
+# Since p value (0.4626) is greater alpha we fail to reject H0. The seasonal pattern is purely deterministic and stationary.
+
+
+# Since the data seem to have a stochastic trend, we need to differentiate.
+
+# Differencing:
+ndiffs(cdata)
+
+# Lets plot the graph after taking one differencing.
+
+data_comp = diff(cdata)
+autoplot(data_comp)
+
+hegy.out.data_comp <- HEGY.test(wts=data_comp, itsd=c(1, 0, 0),regvar=0, selectlags=list(mode="aic", Pmax=12))
+hegy.out.data_comp$stats
+
+# Since p-value of tpi_1 < 0.05 we reject H0. We can say that we dont have regular unit root.
+
+# Again p-value of F_11:12 < 0.05 we reject H0 which means that the data does not contain seasonal unit root.
+
+tseries::kpss.test(data_comp, null = c("Level"))
+tseries::kpss.test(data_comp, null = c("Trend"))
+#Ho: The process is stationary. 
+#H1: The process is not stationary.
+#p-value equals to 0.1 and it is less than alpha so we reject H0 i.e. the process is not stationary and seems to have a stochastic trend.
+
+adf.test(data_comp)
+
+```
+```{r}
+# Since we still have non-stationary data, we should take the second differance.
+
+data_comp2 = diff(data_comp)
+
+autoplot(data_comp2) + theme_classic()
+
+hegy.out.data_comp2 <- HEGY.test(wts=data_comp2, itsd=c(1, 0, 0),regvar=0, selectlags=list(mode="aic", Pmax=12))
+hegy.out.data_comp2$stats
+
+# Since p-value of tpi_1 < 0.05 we reject H0. We can say that we dont have regular unit root.
+
+# Again p-value of F_11:12 < 0.05 we reject H0 which means that the data does not contain seasonal unit root.
+
+tseries::kpss.test(data_comp2, null = c("Level"))
+tseries::kpss.test(data_comp2, null = c("Trend"))
+#Ho: The process is stationary. 
+#H1: The process is not stationary.
+#p-value equals to 0.1 and it is greater than alpha so we fail to reject H0 i.e. the process is stationary and seems to have a stochastic trend.
+```
+
+```{r}
+# Time Series Plot and ACF, PACF Plots After Differencing:
+
+p3 = autoplot(data_comp2, col = "red",main ="Time Series Plot of Differenced Data",lag.max = 48) + theme_classic()
+
+p1 = ggAcf(as.factor(data_comp2),col="blue",main="ACF Plot of Differenced Data",lag.max = 48) + theme_classic()
+
+p2 = ggPacf(as.factor(data_comp2),col="blue",main="PACF Plot of Differenced Data",lag.max=48) + theme_classic()
+
+grid.arrange(p3,p1,p2,ncol=3)
+
+
+ggAcf(as.factor(data_comp2),main="ACF Plot of Differenced Data") + theme_classic()
+
+# We can see that the data become stationary.
+
+
+ggPacf(as.factor(data_comp2), main="PACF Plot of Differenced Data") + theme_classic()
+
+ts.plot(data_comp2, main = "Time Series Plot of Employees")
+```
+
+
+```{r} 
+#Models
+
+# According to the acf and pacf graphs we can take ARIMA(2,2,2) as a model.
+
+auto.arima(cdata)
+
+# From auto.arima we can take ARIMA(1,0,2)
+
+fit1 = Arima(train, order = c(3,2,1), seasonal = c(1,0,1))
+fit1
+fit2 = Arima(train,order = c(1,2,3), seasonal = c(1,0,1))
+fit2
+fit3 = Arima(train,order = c(3,2,2), seasonal = c(1,0,1))
+fit3
+fit4 = Arima(train,order = c(1,2,2), seasonal = c(1,0,1))
+fit4
+
+# According to the outputs we can choose fit2 as a model.
+```
+
+# Residual Check
+```{r}
+res <- resid(fit2)
+sres <- rstandard(fit2) 
+autoplot(res) + geom_line(y = 0) + theme_classic()
+
+
+autoplot(sres)+geom_line(y=0)+theme_minimal()+ggtitle("Plot of The Standardized Residuals")
+
+p1=ggAcf(res,col="pink",main="ACF Plot of Residuals",lag.max = 48)+theme_minimal()
+p2=ggPacf(res,col="brown",main="PACF Plot of Residuals",lag.max = 48)+theme_minimal()
+grid.arrange(p1,p2,ncol=2)
+
+ggplot(res,aes(x=res))+geom_histogram(bins=30)+geom_density()+ggtitle("Histogram of Residuals")+theme_minimal()
+
+ggAcf(res,lag.max = 50) + theme_classic()
+
+ggPacf(res,lag.max = 50) + theme_classic()
+
+# We can say that residuals seems normal.
+
+
+tsdisplay(residuals(fit1), lag.max = 50, main = '(3,2,1) Residuals')
+tsdisplay(residuals(fit2), lag.max = 50, main = '(1,2,3) Residuals')
+tsdisplay(residuals(fit3), lag.max = 50, main = '(3,2,2) Residuals')
+tsdisplay(residuals(fit4), lag.max = 50, main = '(1,0,2) Residuals')
+
+```
+
+### Checking Normality by formal tests  
+```{r}
+# Box test
+Box.test(res, lag = 40, type = c("Ljung-Box"), fitdf = 0)
+
+# Since the p-value is greater than 0.05 the residuals are independent.
+
+#Jarque Bera Test
+#Ho: Residuals have normal distribution.
+#H1: Residuals do not have normal distribution.
+jarque.bera.test(res)
+
+#p-value is close to 0. We fail to reject H0. Residuals follow normal distribution.
+
+#Shapiro Wilk Test
+#Ho: Residuals have normal distribution.
+#H1: Residuals do not have normal distribution.
+shapiro.test(res)
+#p-value is smaller than 0.05. We fail to reject H0. Residuals follow normal distribution.
+
+#so it is concluded that residuals of series follow normal distribution.
+
+
+ggplot(sres, aes(sample = sres)) +stat_qq()+geom_qq_line()+ggtitle("QQ Plot of the Standardized Residuals")+theme_minimal()
+
+```
+### ARCH Engle’s Test for Residual Heteroscedasticity:  
+```{r}
+ressq = res ^ 2
+sqr_acf = ggAcf(ressq, main = "ACF Plot of Residuals", lag.max = 60) + theme_minimal()
+
+sqr_pacf = ggPacf(ressq,  main = "PACF Plot of Residuals", lag.max = 60) + theme_minimal()
+
+grid.arrange(sqr_acf, sqr_pacf, ncol = 2)
+
+# There are significant spikes, we might have heteroscedasticity problem.
+
+#To check heteroscedasticity assumption, Breusch-Pagan test is used with the following null and alternative hypothesis.
+
+#Ho: Residuals are homoscedastic. (The variance is constant.)
+#H1: Residuals are heteroscedastic. (The variance is changing over time.)
+
+
+m = lm(res ~ cdata+zlag(cdata)+zlag(cdata,2))
+bptest(m)
+
+#Since p value is greater than α, we fail reject Ho. Therefore, we can say that we have enough evidence to claim that there is no heteroscedasticity problem, according to results of Breusch-Pagan test.
+
+
+arch.fit=arima(cdata, order = c(1,2,3), seasonal = c(1,0,1))
+arch.test(arch.fit)
+
+# Since all the p values are less than 0.05 we do not have heteroscedasticity problem.
+
+```
+### ETS Forecasting:  
+
+```{r}
+etsmodel<-ets(train)
+etsmodel
+
+fets<-forecast::forecast(etsmodel,h= 12)
+autoplot(fets) + theme_minimal() + ggtitle("ETS Forecast")
+
+accuracy(fets, test)
+#Jarque Bera Test
+#Ho: Residuals have normal distribution.
+#H1: Residuals do not have normal distribution.
+jarque.bera.test(fets$residuals)
+
+#p-value is close to 0. We fail to reject H0. Residuals follow normal distribution.
+
+shapiro.test(etsmodel$residuals)
+
+# they do not follow normal distribution. 
+```
+### Prophet Forecasting:  
+```{r}
+ds <- c(seq(as.Date("1990/01/01"),as.Date("2018/12/01"), by = "month"))
+df<-data.frame(ds, y=as.numeric(train))
+prp <- prophet::prophet(df)
+
+future = make_future_dataframe(prp, periods = 12, freq = "month") 
+tail(future)
+
+pred = predict(prp, future)
+tail(pred[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')], 12)
+
+plot(prp, pred)
+
+
+
+```
+
+### TBATS Forecasting:  
+```{r}
+tbatsmod=tbats(train)
+summary(tbatsmod)
+
+autoplot(train,main="TS plot of Train with TBATS Fitted") +autolayer(fitted(tbatsmod), series="Fitted") +theme_minimal()
+
+f_tb=forecast::forecast(tbatsmod,h= 12)
+
+
+autoplot(f_tb) + theme_minimal() + ggtitle("TBATS Forecast")
+
+accuracy(f_tb, test)
+
+
+#Jarque Bera Test
+#Ho: Residuals have normal distribution.
+#H1: Residuals do not have normal distribution.
+jarque.bera.test(f_tb$residuals)
+
+#p-value is close to 0. We fail to reject H0. Residuals follow normal distribution.
+
+shapiro.test(f_tb$residuals)
+```
+### NNETAR Forecasting:  
+```{r}
+nmodel=nnetar(train)
+summary(nmodel)
+nnforecast=forecast::forecast(nmodel, h = 12,PI=TRUE)
+
+autoplot(train) + autolayer(fitted(nmodel)) + theme_minimal() + ggtitle("Fitted Values of NN")
+
+autoplot(nnforecast) + theme_minimal()
+
+accuracy(nnforecast, test)
+
+shapiro.test(nmodel$residuals)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
